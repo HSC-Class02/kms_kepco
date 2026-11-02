@@ -1,0 +1,15 @@
+{
+  "corp_name": "한국전력공사",
+  "stock_code": "015760",
+  "fs_div": "CFS",
+  "start_year": 2015,
+  "end_year": 2026,
+  "updated_at": "2026-11-02T18:29+09:00",
+  "requested_reports": 48,
+  "available_reports": 43,
+  "annual_records": 11,
+  "half_year_records": 11,
+  "quarterly_records": 42,
+  "data_source": "OpenDART fnlttSinglAcntAll",
+  "quarterly_method": "standalone IS/CF values derived from sequential YTD report differences"
+}

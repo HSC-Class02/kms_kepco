@@ -1,0 +1,28 @@
+{
+  "corp_name": "한국전력공사",
+  "stock_code": "015760",
+  "corp_code": "00159193",
+  "fs_div": "CFS",
+  "company": {
+    "status": "000",
+    "message": "정상",
+    "corp_code": "00159193",
+    "corp_name": "한국전력공사(주)",
+    "corp_name_eng": "KOREA ELECTRIC POWER CORPORATION",
+    "stock_name": "한국전력공사",
+    "stock_code": "015760",
+    "ceo_nm": "김동철",
+    "corp_cls": "Y",
+    "jurir_no": "1146710001456",
+    "bizr_no": "1208200052",
+    "adres": "전라남도 나주시 전력로 55 -",
+    "hm_url": "www.kepco.co.kr",
+    "ir_url": "",
+    "phn_no": "061-345-3114",
+    "fax_no": "02-3456-4298",
+    "induty_code": "35120",
+    "est_dt": "19610701",
+    "acc_mt": "12"
+  },
+  "updated_at": "2026-11-02T18:29:53.982277+09:00"
+}
