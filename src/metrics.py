@@ -79,6 +79,21 @@ def _sum_available(values):
     return sum(valid) if valid else None
 
 
+def _sum_account_rows(rows, keywords, excluded=()):
+    matches = []
+    for row in rows:
+        if row.get("sj_div") != "BS":
+            continue
+        name = _norm(row.get("account_nm"))
+        if any(_norm(word) in name for word in keywords) and not any(
+            _norm(word) in name for word in excluded
+        ):
+            value = amount(row)
+            if value is not None:
+                matches.append(value)
+    return _sum_available(matches)
+
+
 def extract_report(rows, year, period):
     """Extract one DART report. BS is a point-in-time value; IS/CF are YTD flows."""
     bs = {
@@ -96,13 +111,15 @@ def extract_report(rows, year, period):
         "payables": _value(
             rows, ["매입채무및기타채무", "매입채무", "미지급금및기타채무"], "BS"
         ),
-        "short_borrowings": _value(
+        "short_borrowings": _sum_account_rows(
             rows,
-            ["단기차입금", "유동성장기차입금", "유동성사채", "유동성장기부채"],
-            "BS",
+            ["단기차입금", "유동성장기차입금", "유동성사채", "유동성장기부채",
+             "단기리스부채", "유동성리스부채"],
         ),
-        "long_borrowings": _value(
-            rows, ["장기차입금", "장기금융부채", "사채"], "BS"
+        "long_borrowings": _sum_account_rows(
+            rows,
+            ["장기차입금", "장기금융부채", "비유동사채", "비유동리스부채"],
+            excluded=["유동성", "단기"],
         ),
     }
 
