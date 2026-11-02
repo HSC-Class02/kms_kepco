@@ -21,11 +21,12 @@ permissions:
 
 concurrency:
   group: kepco-pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   collect-build-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -45,6 +46,7 @@ jobs:
         if: steps.schedule.outputs.run == 'true'
         uses: actions/checkout@v7
         with:
+          fetch-depth: 0
           persist-credentials: true
 
       - name: Set up Python 3.12
