@@ -15,7 +15,8 @@ FLOW_KEYS = (
 BS_KEYS = (
     "assets", "cash", "receivables", "inventory", "ppe", "current_assets",
     "current_liabilities", "liabilities", "equity", "payables",
-    "short_borrowings", "long_borrowings",
+    "short_borrowings", "long_borrowings", "current_financial_liabilities",
+    "noncurrent_financial_liabilities",
 )
 
 
@@ -120,6 +121,14 @@ def extract_report(rows, year, period):
             rows,
             ["장기차입금", "장기금융부채", "비유동사채", "비유동리스부채"],
             excluded=["유동성", "단기"],
+        ),
+        # KEPCO's published consolidated statement groups much of its funding
+        # under "other financial liabilities". Keep this explicitly as a proxy.
+        "current_financial_liabilities": _value(
+            rows, ["기타 유동 금융부채", "기타유동금융부채"], "BS"
+        ),
+        "noncurrent_financial_liabilities": _value(
+            rows, ["기타 비유동 금융부채", "기타비유동금융부채"], "BS"
         ),
     }
 
@@ -270,6 +279,9 @@ def calculate(current, previous=None, period_days=365, prior_comparable=None):
     data["debt_to_equity_pct"] = _ratio_pct(data.get("liabilities"), data.get("equity"))
     data["equity_ratio_pct"] = _ratio_pct(data.get("equity"), data.get("assets"))
     data["debt_dependency_pct"] = _ratio_pct(data.get("interest_bearing_debt"), data.get("assets"))
+    data["financial_liabilities_to_assets_pct"] = _ratio_pct(
+        data.get("financial_liabilities_proxy"), data.get("assets")
+    )
     interest = data.get("interest_expense")
     data["interest_coverage"] = _div(operating_income, abs(interest) if interest is not None else None)
     data["net_debt_to_ebitda"] = _div(data.get("net_debt"), data.get("ebitda"))
@@ -311,13 +323,16 @@ def to_frame(records):
         "revenue", "gross_profit", "cost_of_sales", "sga", "operating_income",
         "pretax_income", "net_income", "controlling_net_income",
         "assets", "current_assets", "cash", "receivables", "inventory", "ppe",
-        "current_liabilities", "payables", "liabilities", "equity",
+        "current_liabilities", "current_financial_liabilities",
+        "noncurrent_financial_liabilities", "financial_liabilities_proxy",
+        "net_financial_liabilities_proxy", "payables", "liabilities", "equity",
         "interest_bearing_debt", "net_debt",
         "cfo", "cfi", "cff", "capex", "fcf", "ebitda",
         "gross_margin_pct", "operating_margin_pct", "net_margin_pct",
         "ebitda_margin_pct", "roa_pct", "roe_pct", "current_ratio_pct",
         "quick_ratio_pct", "debt_to_equity_pct", "equity_ratio_pct",
-        "debt_dependency_pct", "interest_coverage", "net_debt_to_ebitda",
+        "debt_dependency_pct", "financial_liabilities_to_assets_pct",
+        "interest_coverage", "net_debt_to_ebitda",
         "asset_turnover", "dso_days", "dio_days", "dpo_days", "ccc_days",
         "revenue_growth_pct", "cfo_to_net_income",
     ]
