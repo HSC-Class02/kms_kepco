@@ -209,6 +209,13 @@ def extract_report(rows, year, period):
     capex = _sum_available([abs(value) for value in capex_items if value is not None])
     debt = _sum_available([bs["short_borrowings"], bs["long_borrowings"]])
     net_debt = None if debt is None or bs["cash"] is None else debt - bs["cash"]
+    financial_liabilities_proxy = _sum_available([
+        bs["current_financial_liabilities"], bs["noncurrent_financial_liabilities"]
+    ])
+    net_financial_liabilities_proxy = (
+        None if financial_liabilities_proxy is None or bs["cash"] is None
+        else financial_liabilities_proxy - bs["cash"]
+    )
     ebitda = (
         None if pl["operating_income"] is None
         else pl["operating_income"] + (pl["depreciation"] or 0)
@@ -217,6 +224,8 @@ def extract_report(rows, year, period):
 
     return {
         **bs, **pl, **cf,
+        "financial_liabilities_proxy": financial_liabilities_proxy,
+        "net_financial_liabilities_proxy": net_financial_liabilities_proxy,
         "year": int(year),
         "period": period,
         "period_label": {
