@@ -236,7 +236,7 @@ def main():
             index=False,
             encoding="utf-8-sig",
         )
-        _write_json(PROC / f"financials_{name}.json", frame.where(pd.notna(frame), None).to_dict(orient="records"))
+        _write_json(PROC / f"financials_{name}.json", frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records"))
 
     combined = to_frame(all_records)
     combined.to_csv(PROC / "financials.csv", index=False, encoding="utf-8-sig")
