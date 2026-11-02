@@ -1,120 +1,279 @@
-import json, os, datetime as dt
+"""Collect KEPCO financial statements, calculate ratios, and render the dashboard."""
+import datetime as dt
+import json
 from pathlib import Path
-import pandas as pd
-from .config import CORP_STOCK_CODE, CORP_NAME, YEARS_BACK
-from .dart_api import find_corp_code, disclosures, financials
-from .metrics import extract_year, calculate, to_frame
+from zoneinfo import ZoneInfo
 
-ROOT=Path(__file__).resolve().parents[1]
-RAW=ROOT/"data/raw"; PROC=ROOT/"data/processed"; DASH=ROOT/"dashboard"
-for p in (RAW,PROC,DASH): p.mkdir(parents=True,exist_ok=True)
+import pandas as pd
+
+from .config import (
+    API_KEY, CORP_NAME, CORP_STOCK_CODE, FS_DIV, REPORT_CODES, START_YEAR,
+)
+from .dart_api import company, disclosures, financials, find_corp_code
+from .metrics import FLOW_KEYS, calculate, extract_report, to_frame
+from .dashboard import generate_dashboard
+
+ROOT = Path(__file__).resolve().parents[1]
+RAW = ROOT / "data" / "raw"
+PROC = ROOT / "data" / "processed"
+DASH = ROOT / "dashboard"
+for folder in (RAW, PROC, DASH):
+    folder.mkdir(parents=True, exist_ok=True)
+
+
+def _write_json(path, payload):
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+
+
+def _period_days(year, period):
+    starts = {
+        "Q1": dt.date(year, 1, 1),
+        "Q2": dt.date(year, 4, 1),
+        "Q3": dt.date(year, 7, 1),
+        "Q4": dt.date(year, 10, 1),
+        "H1": dt.date(year, 1, 1),
+        "FY": dt.date(year, 1, 1),
+    }
+    ends = {
+        "Q1": dt.date(year, 4, 1),
+        "Q2": dt.date(year, 7, 1),
+        "Q3": dt.date(year, 10, 1),
+        "Q4": dt.date(year + 1, 1, 1),
+        "H1": dt.date(year, 7, 1),
+        "FY": dt.date(year + 1, 1, 1),
+    }
+    return (ends[period] - starts[period]).days
+
+
+def _make_standalone_quarter(current, previous_cumulative, year, quarter):
+    """Convert YTD IS/CF figures into a standalone quarter; retain closing BS balances."""
+    row = dict(current)
+    row["year"] = year
+    row["period"] = quarter
+    row["period_label"] = {
+        "Q1": "1분기", "Q2": "2분기", "Q3": "3분기", "Q4": "4분기"
+    }[quarter]
+    if previous_cumulative is not None:
+        for key in FLOW_KEYS:
+            current_value = current.get(key)
+            previous_value = previous_cumulative.get(key)
+            if current_value is None or previous_value is None:
+                row[key] = None
+            else:
+                row[key] = current_value - previous_value
+
+    capex_values = [row.get("capex_ppe"), row.get("capex_intangible")]
+    capex_values = [abs(value) for value in capex_values if value is not None]
+    row["capex"] = sum(capex_values) if capex_values else None
+
+    debt_values = [row.get("short_borrowings"), row.get("long_borrowings")]
+    debt_values = [value for value in debt_values if value is not None]
+    row["interest_bearing_debt"] = sum(debt_values) if debt_values else None
+    row["net_debt"] = (
+        None if row["interest_bearing_debt"] is None or row.get("cash") is None
+        else row["interest_bearing_debt"] - row["cash"]
+    )
+    row["ebitda"] = (
+        None if row.get("operating_income") is None
+        else row["operating_income"] + (row.get("depreciation") or 0)
+    )
+    row["fcf"] = (
+        None if row.get("cfo") is None or row.get("capex") is None
+        else row["cfo"] - row["capex"]
+    )
+    return row
+
+
+def _index_by_year(records):
+    return {int(row["year"]): row for row in records}
+
 
 def main():
-    corp_code=find_corp_code(CORP_STOCK_CODE)
-    (PROC/"company.json").write_text(json.dumps({
-        "corp_name":CORP_NAME,"stock_code":CORP_STOCK_CODE,"corp_code":corp_code,
-        "updated_at":dt.datetime.now(dt.timezone.utc).isoformat()
-    },ensure_ascii=False,indent=2),encoding="utf-8")
+    if len(API_KEY) != 40:
+        raise RuntimeError(
+            "DART_API_KEY가 없거나 형식이 올바르지 않습니다. "
+            "저장소 Secrets에 DART_API_KEY를 40자리 인증키로 등록하세요."
+        )
+    if FS_DIV not in {"CFS", "OFS"}:
+        raise RuntimeError("DART_FS_DIV는 CFS 또는 OFS여야 합니다.")
 
-    today=dt.date.today()
-    start=(today-dt.timedelta(days=365*6)).strftime("%Y%m%d")
-    end=today.strftime("%Y%m%d")
-    disc=disclosures(corp_code,start,end)
-    (RAW/"disclosures.json").write_text(json.dumps(disc,ensure_ascii=False,indent=2),encoding="utf-8")
+    now = dt.datetime.now(ZoneInfo("Asia/Seoul"))
+    today = now.date()
+    corp_code = find_corp_code(CORP_STOCK_CODE)
+    company_info = company(corp_code)
+    _write_json(PROC / "company.json", {
+        "corp_name": CORP_NAME,
+        "stock_code": CORP_STOCK_CODE,
+        "corp_code": corp_code,
+        "fs_div": FS_DIV,
+        "company": company_info,
+        "updated_at": now.isoformat(),
+    })
 
-    years=list(range(today.year-YEARS_BACK+1,today.year+1))
-    rows=[]
-    for year in years:
-        try:
-            data=financials(corp_code,year,"11011","CFS")
-            (RAW/f"financials_{year}.json").write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
-            cur=extract_year(data.get("list",[]))
-            cur["year"]=year; cur["period"]="FY"
-            rows.append(cur)
-        except Exception as e:
-            print(f"[WARN] {year}: {e}")
+    disclosures_data = disclosures(
+        corp_code,
+        f"{START_YEAR}0101",
+        today.strftime("%Y%m%d"),
+    )
+    _write_json(RAW / "disclosures.json", disclosures_data)
 
-    rows=sorted(rows,key=lambda x:x["year"])
-    calculated=[]
-    for i,r in enumerate(rows):
-        calculated.append(calculate(r, rows[i-1] if i else None))
-    df=to_frame(calculated)
-    df.to_csv(PROC/"financials.csv",index=False,encoding="utf-8-sig")
-    (PROC/"financials.json").write_text(df.to_json(orient="records",force_ascii=False,indent=2),encoding="utf-8")
-    generate_dashboard(df,disc)
-    print(df.to_string(index=False))
+    cumulative = {}
+    request_count = 0
+    available_count = 0
+    for year in range(START_YEAR, today.year + 1):
+        for period, report_code in REPORT_CODES.items():
+            request_count += 1
+            try:
+                payload = financials(corp_code, year, report_code, FS_DIV)
+                _write_json(RAW / f"financials_{year}_{period}.json", payload)
+                rows = payload.get("list", [])
+                if not rows:
+                    print(f"[INFO] {year} {period}: DART 보고서 데이터 없음")
+                    continue
+                cumulative[(year, period)] = extract_report(rows, year, period)
+                available_count += 1
+            except Exception as error:
+                print(f"[WARN] {year} {period}: {error}")
 
-def fmt(v):
-    if v is None or pd.isna(v): return "-"
-    return f"{v:,.1f}"
+    if not cumulative:
+        raise RuntimeError(
+            "수집된 재무제표가 없습니다. DART_API_KEY, 종목코드, API 사용 상태를 확인하세요."
+        )
 
-def generate_dashboard(df,disc):
-    records=df.to_dict(orient="records")
-    latest=records[-1] if records else {}
-    labels=[str(r["year"]) for r in records]
-    def series(k): return [None if r.get(k) is None else round(float(r[k]),3) for r in records]
-    disclosures_list=disc.get("list",[])[:20]
-    cards=[
-      ("매출액", latest.get("revenue"), "원"),
-      ("영업이익", latest.get("operating_income"), "원"),
-      ("당기순이익", latest.get("net_income"), "원"),
-      ("영업현금흐름", latest.get("cfo"), "원"),
-      ("총부채", latest.get("liabilities"), "원"),
-      ("순차입금", latest.get("net_debt"), "원"),
+    # Annual table: one row per available business year.
+    annual_raw = [
+        cumulative[(year, "FY")]
+        for year in range(START_YEAR, today.year + 1)
+        if (year, "FY") in cumulative
     ]
-    card_html="".join(f'<div class="card"><div class="label">{a}</div><div class="value">{fmt(b)}</div><div class="unit">{c}</div></div>' for a,b,c in cards)
-    disc_html="".join(f'<tr><td>{x.get("rcept_dt","")}</td><td>{x.get("report_nm","")}</td><td><a target="_blank" href="https://dart.fss.or.kr/dsaf001/main.do?rcpNo={x.get("rcept_no","")}">DART</a></td></tr>' for x in disclosures_list)
-    html=f"""<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{CORP_NAME} DART 재무 Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>
-body{{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f7fb;margin:0;color:#172033}}
-.wrap{{max-width:1200px;margin:auto;padding:28px}} h1{{margin-bottom:4px}} .muted{{color:#667085}}
-.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin:24px 0}}
-.card,.panel{{background:white;border:1px solid #e5e7eb;border-radius:14px;padding:18px;box-shadow:0 2px 8px rgba(0,0,0,.04)}}
-.label{{font-size:13px;color:#667085}} .value{{font-size:22px;font-weight:700;margin-top:8px;word-break:break-all}} .unit{{font-size:11px;color:#98a2b3;margin-top:4px}}
-.grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}} .panel{{margin-top:16px}} canvas{{max-height:340px}}
-table{{width:100%;border-collapse:collapse}} th,td{{padding:9px;border-bottom:1px solid #eee;text-align:left;font-size:13px}} th{{color:#667085}}
-@media(max-width:800px){{.grid{{grid-template-columns:1fr}}}}
-.badge{{display:inline-block;padding:4px 8px;border-radius:99px;background:#eef2ff;color:#3730a3;font-size:12px}}
-</style></head><body><div class="wrap">
-<h1>한국전력공사 DART 재무 Dashboard</h1>
-<div class="muted">OpenDART 자동 수집 · 최근 {len(records)}개 사업연도 · 최종 업데이트 {dt.datetime.now().strftime("%Y-%m-%d %H:%M")}</div>
-<div class="cards">{card_html}</div>
-<div class="grid">
-<div class="panel"><h3>매출 · 영업이익</h3><canvas id="profit"></canvas></div>
-<div class="panel"><h3>현금흐름 · FCF</h3><canvas id="cash"></canvas></div>
-<div class="panel"><h3>수익성 비율</h3><canvas id="margin"></canvas></div>
-<div class="panel"><h3>재무안정성</h3><canvas id="stability"></canvas></div>
-</div>
-<div class="panel"><h3>최근 DART 정기공시</h3><table><thead><tr><th>접수일</th><th>보고서</th><th>원문</th></tr></thead><tbody>{disc_html}</tbody></table></div>
-<div class="panel"><h3>분석 기준</h3><p>첨부된 「재무제표 및 재무비율 실무 가이드」의 분석 순서인 매출 성장 → 이익률 → 현금흐름 → 차입 부담 → 투자수익률 → 주가 수준을 바탕으로 구성했습니다. 연결/별도 기준과 기간을 통일하고, 단일 비율보다 지표 간 연결을 확인하도록 설계했습니다.</p>
-<p class="muted">DPO, ROIC, WACC, PER, PBR, EV/EBITDA는 DART 재무제표 데이터만으로 신뢰성 있게 산출하기 어려운 항목을 별도 확장 대상으로 남겨두었습니다.</p></div>
-</div>
-<script>
-const labels={json.dumps(labels,ensure_ascii=False)};
-const common={{responsive:true,plugins:{{legend:{{position:"bottom"}}}}}};
-new Chart(document.getElementById("profit"),{{type:"line",data:{{labels,datasets:[
-{{label:"매출액",data:{json.dumps(series("revenue"))},tension:.25}},
-{{label:"영업이익",data:{json.dumps(series("operating_income"))},tension:.25}}
-]}},options:common}});
-new Chart(document.getElementById("cash"),{{type:"bar",data:{{labels,datasets:[
-{{label:"CFO",data:{json.dumps(series("cfo"))}}},{{label:"FCF",data:{json.dumps(series("fcf"))}}}
-]}},options:common}});
-new Chart(document.getElementById("margin"),{{type:"line",data:{{labels,datasets:[
-{{label:"매출총이익률 %",data:{json.dumps(series("gross_margin_pct"))},tension:.25}},
-{{label:"영업이익률 %",data:{json.dumps(series("operating_margin_pct"))},tension:.25}},
-{{label:"순이익률 %",data:{json.dumps(series("net_margin_pct"))},tension:.25}},
-{{label:"ROE %",data:{json.dumps(series("roe_pct"))},tension:.25}}
-]}},options:common}});
-new Chart(document.getElementById("stability"),{{type:"line",data:{{labels,datasets:[
-{{label:"부채비율 %",data:{json.dumps(series("debt_to_equity_pct"))},tension:.25}},
-{{label:"자기자본비율 %",data:{json.dumps(series("equity_ratio_pct"))},tension:.25}},
-{{label:"이자보상배율",data:{json.dumps(series("interest_coverage"))},tension:.25}}
-]}},options:common}});
-</script></body></html>"""
-    (DASH/"index.html").write_text(html,encoding="utf-8")
+    annual_by_year = _index_by_year(annual_raw)
+    annual = []
+    for raw in annual_raw:
+        year = int(raw["year"])
+        previous = annual_by_year.get(year - 1)
+        annual.append(calculate(
+            raw,
+            previous=previous,
+            period_days=_period_days(year, "FY"),
+            prior_comparable=previous,
+        ))
 
-if __name__=="__main__":
+    # Half-year table: H1 report figures are year-to-date, not standalone Q2 figures.
+    half_raw = [
+        cumulative[(year, "H1")]
+        for year in range(START_YEAR, today.year + 1)
+        if (year, "H1") in cumulative
+    ]
+    half_by_year = _index_by_year(half_raw)
+    half_year = []
+    for raw in half_raw:
+        year = int(raw["year"])
+        half_year.append(calculate(
+            raw,
+            previous=annual_by_year.get(year - 1),
+            period_days=_period_days(year, "H1"),
+            prior_comparable=half_by_year.get(year - 1),
+        ))
+
+    # Standalone quarterly table. Q2/Q3/Q4 are derived from successive YTD reports.
+    quarter_raw = []
+    prior_quarter_balance = None
+    for year in range(START_YEAR, today.year + 1):
+        specifications = [
+            ("Q1", "Q1", None),
+            ("Q2", "H1", "Q1"),
+            ("Q3", "Q3", "H1"),
+            ("Q4", "FY", "Q3"),
+        ]
+        for quarter, source_period, prior_period in specifications:
+            source = cumulative.get((year, source_period))
+            if source is None:
+                continue
+            previous_cumulative = (
+                cumulative.get((year, prior_period)) if prior_period else None
+            )
+            if prior_period and previous_cumulative is None:
+                print(
+                    f"[INFO] {year} {quarter}: 선행 누적 보고서({prior_period})가 없어 "
+                    "독립 분기 산출을 건너뜁니다."
+                )
+                continue
+            row = _make_standalone_quarter(
+                source, previous_cumulative, year, quarter
+            )
+            quarter_raw.append(row)
+
+    quarter_raw.sort(key=lambda row: (int(row["year"]), row["period"]))
+    quarter_lookup = {
+        (int(row["year"]), row["period"]): row for row in quarter_raw
+    }
+    quarterly = []
+    for row in quarter_raw:
+        year = int(row["year"])
+        quarter = row["period"]
+        previous = quarterly[-1] if quarterly else annual_by_year.get(year - 1)
+        prior_comparable = quarter_lookup.get((year - 1, quarter))
+        quarterly.append(calculate(
+            row,
+            previous=previous,
+            period_days=_period_days(year, quarter),
+            prior_comparable=prior_comparable,
+        ))
+
+    # Save both separated period files and the combined dataset used by analysts.
+    frames = {
+        "annual": to_frame(annual),
+        "half_year": to_frame(half_year),
+        "quarterly": to_frame(quarterly),
+    }
+    all_records = annual + half_year + quarterly
+    for name, frame in frames.items():
+        frame.to_csv(
+            PROC / f"financials_{name}.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+        _write_json(PROC / f"financials_{name}.json", frame.where(pd.notna(frame), None).to_dict(orient="records"))
+
+    combined = to_frame(all_records)
+    combined.to_csv(PROC / "financials.csv", index=False, encoding="utf-8-sig")
+    _write_json(
+        PROC / "financials.json",
+        combined.astype(object).where(pd.notna(combined), None).to_dict(orient="records"),
+    )
+
+    metadata = {
+        "corp_name": CORP_NAME,
+        "stock_code": CORP_STOCK_CODE,
+        "fs_div": FS_DIV,
+        "start_year": START_YEAR,
+        "end_year": today.year,
+        "updated_at": now.isoformat(timespec="minutes"),
+        "requested_reports": request_count,
+        "available_reports": available_count,
+        "annual_records": len(annual),
+        "half_year_records": len(half_year),
+        "quarterly_records": len(quarterly),
+        "data_source": "OpenDART fnlttSinglAcntAll",
+        "quarterly_method": "standalone IS/CF values derived from sequential YTD report differences",
+    }
+    _write_json(PROC / "update_metadata.json", metadata)
+    generate_dashboard(
+        annual,
+        half_year,
+        quarterly,
+        disclosures_data,
+        metadata,
+        DASH / "index.html",
+    )
+    print(
+        f"[DONE] {CORP_NAME}: annual={len(annual)}, "
+        f"half-year={len(half_year)}, quarterly={len(quarterly)}"
+    )
+
+
+if __name__ == "__main__":
     main()
