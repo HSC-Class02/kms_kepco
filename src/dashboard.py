@@ -30,6 +30,10 @@ COLUMNS = [
     ("inventory", "재고자산", "money"),
     ("ppe", "유형자산", "money"),
     ("current_liabilities", "유동부채", "money"),
+    ("current_financial_liabilities", "기타 유동 금융부채", "money"),
+    ("noncurrent_financial_liabilities", "기타 비유동 금융부채", "money"),
+    ("financial_liabilities_proxy", "금융부채 합계(대용치)", "money"),
+    ("net_financial_liabilities_proxy", "금융부채-현금(대용치)", "money"),
     ("payables", "매입채무", "money"),
     ("liabilities", "부채총계", "money"),
     ("equity", "자본총계", "money"),
@@ -50,6 +54,7 @@ COLUMNS = [
     ("debt_to_equity_pct", "부채비율", "pct"),
     ("equity_ratio_pct", "자기자본비율", "pct"),
     ("debt_dependency_pct", "차입금의존도", "pct"),
+    ("financial_liabilities_to_assets_pct", "금융부채/자산(대용치)", "pct"),
     ("interest_coverage", "이자보상배율", "multiple"),
     ("net_debt_to_ebitda", "순차입금/EBITDA", "multiple"),
     ("asset_turnover", "총자산회전율", "multiple"),
@@ -233,7 +238,7 @@ a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}.shel
 </section>
 <section class="analysis-strip">
  <div class="insight"><b>수익성 분석</b><span>전력 판매수익과 연료·구입전력비 등 원가 요인의 변화를 함께 확인합니다. 매출 성장만으로 수익성 개선을 판단하지 않습니다.</span></div>
- <div class="insight"><b>재무 안정성</b><span>부채비율, 차입금의존도, 유동비율과 순차입금/EBITDA를 함께 비교해 자본구조와 상환 부담을 점검합니다.</span></div>
+ <div class="insight"><b>재무 안정성</b><span>부채비율·유동비율을 확인하고, 별도 표시한 금융부채 대용치는 기타 금융부채 공시계정을 합산한 참고 수치로 해석합니다. 순수 차입금/EBITDA와 혼동하지 않습니다.</span></div>
  <div class="insight"><b>현금흐름 분석</b><span>영업현금흐름에서 CAPEX를 차감한 FCF를 확인하고, 회계상 이익과 현금창출력의 차이를 추적합니다.</span></div>
 </section>
 
@@ -246,7 +251,7 @@ a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}.shel
  <strong>데이터 해석 및 범위</strong><br>
  • OpenDART 전체 재무제표 API가 제공하는 2015년 이후 자료를 수집합니다. 연결재무제표(CFS)를 기본으로 하며 개별재무제표와 혼합하지 않습니다.<br>
  • 반기 및 3분기 보고서의 손익·현금흐름 누적 금액을 전분기 누적치와 차감하여 Q2·Q3·Q4 독립 분기 수치를 산출합니다. 분기 재무상태표는 각 보고기간 말 잔액입니다.<br>
- • 중간기간 ROA·ROE·총자산회전율은 기간 일수로 연환산합니다. 일부 비율은 원천 계정이 없거나 분모가 0인 경우 표시하지 않습니다. DPO·CCC 등은 관련 계정 확보 여부에 따라 공란일 수 있습니다.
+ • 중간기간 ROA·ROE·총자산회전율은 기간 일수로 연환산합니다. 한국전력의 일부 차입·사채 항목은 공시상 기타 금융부채에 합산되어 별도 계정으로 식별되지 않을 수 있으므로, 금융부채 합계(대용치)는 기타 유동·비유동 금융부채의 합으로 표시하며 순수 이자부차입금과 구분합니다. 관련 원천 계정이 없거나 분모가 0인 비율 및 DPO·CCC 등은 공란일 수 있습니다.
 </div>
 
 <section class="peer-panel">
