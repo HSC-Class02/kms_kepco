@@ -1,0 +1,96 @@
+name: KEPCO DART Financial Agent
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "requirements.txt"
+      - ".github/workflows/**"
+      - "README.md"
+  schedule:
+    # 22:30 UTC on days 28-31 is 07:30 KST on the following day.
+    # The guard below runs the collection only when the KST date is the 1st.
+    - cron: "30 22 28-31 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: kepco-pages
+  cancel-in-progress: false
+
+jobs:
+  collect-build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check monthly KST schedule
+        id: schedule
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ "$(TZ=Asia/Seoul date +%d)" != "01" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Scheduled trigger is not the first day in Korea; skipping data refresh."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository
+        if: steps.schedule.outputs.run == 'true'
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: true
+
+      - name: Set up Python 3.12
+        if: steps.schedule.outputs.run == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        if: steps.schedule.outputs.run == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Collect DART data and build dashboard
+        if: steps.schedule.outputs.run == 'true'
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          DART_FS_DIV: CFS
+        run: python -m src.main
+
+      - name: Commit updated data files
+        if: steps.schedule.outputs.run == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/raw data/processed dashboard/index.html
+          if git diff --cached --quiet; then
+            echo "No generated data changes to commit."
+          else
+            git commit -m "chore(data): refresh KEPCO financial statements"
+            git push
+          fi
+
+      - name: Configure GitHub Pages
+        if: steps.schedule.outputs.run == 'true'
+        uses: actions/configure-pages@v6
+
+      - name: Upload dashboard artifact
+        if: steps.schedule.outputs.run == 'true'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: dashboard
+
+      - name: Deploy to GitHub Pages
+        if: steps.schedule.outputs.run == 'true'
+        id: deployment
+        uses: actions/deploy-pages@v5
