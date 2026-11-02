@@ -9,12 +9,12 @@ from urllib3.util.retry import Retry
 
 from .config import API_KEY, BASE_URL
 
-TIMEOUT = 60
+TIMEOUT = (10, 25)
 _SESSION = requests.Session()
 _RETRY = Retry(
-    total=4,
-    connect=4,
-    read=3,
+    total=2,
+    connect=2,
+    read=2,
     backoff_factor=1.0,
     status_forcelist=(429, 500, 502, 503, 504),
     allowed_methods=frozenset(["GET"]),
