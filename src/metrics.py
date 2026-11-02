@@ -1,162 +1,307 @@
-import math
+"""Financial-statement extraction and ratio calculations for KEPCO.
+
+Amounts remain in KRW in the data files. The dashboard converts monetary amounts
+to KRW 100 million (억원) only for display.
+"""
 import re
 import pandas as pd
 
-def clean_num(x):
-    if x is None or x == "":
+
+FLOW_KEYS = (
+    "revenue", "gross_profit", "cost_of_sales", "sga", "operating_income",
+    "pretax_income", "net_income", "controlling_net_income", "interest_expense",
+    "depreciation", "cfo", "cfi", "cff", "capex_ppe", "capex_intangible",
+)
+BS_KEYS = (
+    "assets", "cash", "receivables", "inventory", "ppe", "current_assets",
+    "current_liabilities", "liabilities", "equity", "payables",
+    "short_borrowings", "long_borrowings",
+)
+
+
+def clean_num(value):
+    if value is None:
         return None
-    s = str(x).replace(",", "").replace(" ", "")
+    text = str(value).strip().replace(",", "").replace(" ", "")
+    if not text or text in {"-", "–", "－", "N/A"}:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    if negative:
+        text = text[1:-1]
     try:
-        return float(s)
-    except ValueError:
+        number = float(text)
+    except (TypeError, ValueError):
         return None
+    return -number if negative else number
+
+
+def _norm(value):
+    return re.sub(r"[\s·ㆍ()（）\[\]{}]", "", str(value or "")).lower()
+
 
 def pick(rows, names, sj_div=None):
-    names = [n.lower() if isinstance(n, str) else str(n).lower() for n in names]
-    candidates = []
-    for r in rows:
-        if sj_div and r.get("sj_div") != sj_div:
-            continue
-        nm = str(r.get("account_nm") or "").lower()
-        if any(n in nm for n in names):
-            candidates.append(r)
-    # Prefer exact account name matches.
-    for r in candidates:
-        if str(r.get("account_nm") or "").lower() in names:
-            return r
-    return candidates[0] if candidates else None
-
-def amount(row):
-    if not row:
-        return None
-    for k in ("thstrm_amount", "thstrm_add_amount"):
-        v = clean_num(row.get(k))
-        if v is not None:
-            return v
+    """Prefer exact XBRL labels, then the most specific substring match."""
+    allowed = {sj_div} if isinstance(sj_div, str) else set(sj_div or [])
+    candidates = [
+        row for row in rows
+        if not allowed or row.get("sj_div") in allowed
+    ]
+    aliases = [_norm(name) for name in names]
+    for alias in aliases:
+        for row in candidates:
+            if _norm(row.get("account_nm")) == alias:
+                return row
+    for alias in sorted(aliases, key=len, reverse=True):
+        for row in candidates:
+            if alias and alias in _norm(row.get("account_nm")):
+                return row
     return None
 
-def avg(a,b):
-    if a is None or b is None:
+
+def amount(row, cumulative=False):
+    if not row:
         return None
-    return (a+b)/2
+    keys = ("thstrm_add_amount", "thstrm_amount") if cumulative else ("thstrm_amount",)
+    for key in keys:
+        value = clean_num(row.get(key))
+        if value is not None:
+            return value
+    return None
 
-def div(a,b):
-    if a is None or b in (None,0):
+
+def _value(rows, labels, statement, cumulative=False):
+    row = pick(rows, labels, statement)
+    return amount(row, cumulative=cumulative)
+
+
+def _sum_available(values):
+    valid = [value for value in values if value is not None]
+    return sum(valid) if valid else None
+
+
+def extract_report(rows, year, period):
+    """Extract one DART report. BS is a point-in-time value; IS/CF are YTD flows."""
+    bs = {
+        "assets": _value(rows, ["자산총계", "총자산"], "BS"),
+        "cash": _value(rows, ["현금및현금성자산", "현금및현금성자산및단기금융상품"], "BS"),
+        "receivables": _value(
+            rows, ["매출채권및기타채권", "매출채권및계약자산", "매출채권"], "BS"
+        ),
+        "inventory": _value(rows, ["재고자산"], "BS"),
+        "ppe": _value(rows, ["유형자산"], "BS"),
+        "current_assets": _value(rows, ["유동자산"], "BS"),
+        "current_liabilities": _value(rows, ["유동부채"], "BS"),
+        "liabilities": _value(rows, ["부채총계", "총부채"], "BS"),
+        "equity": _value(rows, ["자본총계"], "BS"),
+        "payables": _value(
+            rows, ["매입채무및기타채무", "매입채무", "미지급금및기타채무"], "BS"
+        ),
+        "short_borrowings": _value(
+            rows,
+            ["단기차입금", "유동성장기차입금", "유동성사채", "유동성장기부채"],
+            "BS",
+        ),
+        "long_borrowings": _value(
+            rows, ["장기차입금", "장기금융부채", "사채"], "BS"
+        ),
+    }
+
+    # Income statement amounts use the accumulated (YTD) value for interim reports.
+    income_statements = ("IS", "CIS")
+    pl = {
+        "revenue": _value(
+            rows, ["매출액", "수익(매출액)", "영업수익", "영업수익(매출액)"],
+            income_statements, cumulative=True
+        ),
+        "gross_profit": _value(
+            rows, ["매출총이익", "매출총이익(손실)"],
+            income_statements, cumulative=True
+        ),
+        "cost_of_sales": _value(
+            rows, ["매출원가", "영업비용"], income_statements, cumulative=True
+        ),
+        "sga": _value(
+            rows, ["판매비와관리비", "판매비및관리비", "판매비와관리비(손실)"],
+            income_statements, cumulative=True
+        ),
+        "operating_income": _value(
+            rows, ["영업이익(손실)", "영업이익", "영업손실"],
+            income_statements, cumulative=True
+        ),
+        "pretax_income": _value(
+            rows,
+            ["법인세비용차감전순이익(손실)", "법인세비용차감전순이익",
+             "세전이익", "법인세비용차감전계속사업이익"],
+            income_statements, cumulative=True
+        ),
+        "net_income": _value(
+            rows, ["당기순이익(손실)", "당기순이익", "당기순손실"],
+            income_statements, cumulative=True
+        ),
+        "controlling_net_income": _value(
+            rows,
+            ["지배기업의 소유주에게 귀속되는 당기순이익(손실)",
+             "지배기업의 소유주에게 귀속되는 당기순이익",
+             "지배기업소유주지분순이익"],
+            income_statements, cumulative=True
+        ),
+        "interest_expense": _value(
+            rows, ["이자비용", "금융원가"], income_statements, cumulative=True
+        ),
+        "depreciation": _value(
+            rows,
+            ["감가상각비및무형자산상각비", "감가상각비와무형자산상각비", "감가상각비"],
+            ("CF",) + income_statements, cumulative=True
+        ),
+    }
+
+    cf = {
+        "cfo": _value(
+            rows, ["영업활동현금흐름", "영업활동으로 인한 현금흐름",
+                   "영업활동으로부터의 순현금흐름"], "CF", cumulative=True
+        ),
+        "cfi": _value(
+            rows, ["투자활동현금흐름", "투자활동으로 인한 현금흐름",
+                   "투자활동으로부터의 순현금흐름"], "CF", cumulative=True
+        ),
+        "cff": _value(
+            rows, ["재무활동현금흐름", "재무활동으로 인한 현금흐름",
+                   "재무활동으로부터의 순현금흐름"], "CF", cumulative=True
+        ),
+        "capex_ppe": _value(
+            rows, ["유형자산의 취득", "유형자산 취득"], "CF", cumulative=True
+        ),
+        "capex_intangible": _value(
+            rows, ["무형자산의 취득", "무형자산 취득"], "CF", cumulative=True
+        ),
+    }
+
+    if pl["gross_profit"] is None and pl["revenue"] is not None and pl["cost_of_sales"] is not None:
+        pl["gross_profit"] = pl["revenue"] - pl["cost_of_sales"]
+
+    capex_items = [cf["capex_ppe"], cf["capex_intangible"]]
+    capex = _sum_available([abs(value) for value in capex_items if value is not None])
+    debt = _sum_available([bs["short_borrowings"], bs["long_borrowings"]])
+    net_debt = None if debt is None or bs["cash"] is None else debt - bs["cash"]
+    ebitda = (
+        None if pl["operating_income"] is None
+        else pl["operating_income"] + (pl["depreciation"] or 0)
+    )
+    fcf = None if cf["cfo"] is None or capex is None else cf["cfo"] - capex
+
+    return {
+        **bs, **pl, **cf,
+        "year": int(year),
+        "period": period,
+        "period_label": {
+            "Q1": "1분기", "H1": "반기", "Q3": "3분기", "FY": "연간"
+        }.get(period, period),
+        "capex": capex,
+        "interest_bearing_debt": debt,
+        "net_debt": net_debt,
+        "ebitda": ebitda,
+        "fcf": fcf,
+    }
+
+
+def _div(numerator, denominator):
+    if numerator is None or denominator in (None, 0):
         return None
-    return a/b
+    return numerator / denominator
 
-def ratio_pct(a,b):
-    v=div(a,b)
-    return None if v is None else v*100
 
-def extract_year(rows):
-    # DART data is reported in KRW; amounts are kept as published.
-    bs = {k: amount(pick(rows, names, "BS")) for k,names in {
-        "assets":["자산총계","총자산"],
-        "cash":["현금및현금성자산"],
-        "receivables":["매출채권","매출채권및기타채권","매출채권및계약자산"],
-        "inventory":["재고자산"],
-        "ppe":["유형자산"],
-        "current_assets":["유동자산"],
-        "current_liabilities":["유동부채"],
-        "liabilities":["부채총계","총부채"],
-        "equity":["자본총계"],
-        "short_borrowings":["단기차입금","단기금융부채","유동성장기차입금","유동성사채"],
-        "long_borrowings":["장기차입금","장기금융부채","사채"],
-    }.items()}
-    pl = {k: amount(pick(rows, names, "IS")) for k,names in {
-        "revenue":["매출액","영업수익"],
-        "gross_profit":["매출총이익"],
-        "sga":["판매비와관리비","판매비및관리비"],
-        "operating_income":["영업이익","영업이익(손실)"],
-        "pretax_income":["법인세비용차감전순이익","세전이익","법인세비용차감전계속사업이익"],
-        "net_income":["당기순이익","당기순이익(손실)"],
-        "controlling_net_income":["지배기업의 소유주에게 귀속되는 당기순이익","지배기업소유주지분순이익"],
-        "interest_expense":["이자비용","금융비용"],
-        "depreciation":["감가상각비","감가상각비및무형자산상각비","감가상각비와무형자산상각비"],
-    }.items()}
-    cf = {k: amount(pick(rows, names, "CF")) for k,names in {
-        "cfo":["영업활동현금흐름","영업활동으로 인한 현금흐름"],
-        "cfi":["투자활동현금흐름","투자활동으로 인한 현금흐름"],
-        "cff":["재무활동현금흐름","재무활동으로 인한 현금흐름"],
-        "capex_ppe":["유형자산의 취득","유형자산 취득"],
-        "capex_intangible":["무형자산의 취득","무형자산 취득"],
-    }.items()}
+def _ratio_pct(numerator, denominator):
+    value = _div(numerator, denominator)
+    return None if value is None else value * 100
 
-    # Some cashflow accounts are presented as negative cash outflows.
-    capex = sum(abs(x) for x in [cf["capex_ppe"], cf["capex_intangible"]] if x is not None) or None
-    debt = sum(x for x in [bs["short_borrowings"], bs["long_borrowings"]] if x is not None) or None
-    net_debt = None if debt is None or bs["cash"] is None else debt-bs["cash"]
-    ebitda = None if pl["operating_income"] is None else pl["operating_income"] + (pl["depreciation"] or 0)
-    fcf = None if cf["cfo"] is None or capex is None else cf["cfo"]-capex
 
-    out = {**bs, **pl, **cf, "capex":capex, "interest_bearing_debt":debt,
-           "net_debt":net_debt, "ebitda":ebitda, "fcf":fcf}
-    return out
+def _average(current, previous, key):
+    a = current.get(key)
+    b = previous.get(key) if previous else None
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return (a + b) / 2
 
-def calculate(current, previous=None, prev_prev=None):
-    d=dict(current)
-    a=current.get("assets")
-    e=current.get("equity")
-    ca=current.get("current_assets")
-    cl=current.get("current_liabilities")
-    rev=current.get("revenue")
-    gp=current.get("gross_profit")
-    oi=current.get("operating_income")
-    ni=current.get("net_income")
-    debt=current.get("interest_bearing_debt")
-    ebitda=current.get("ebitda")
-    d["gross_margin_pct"]=ratio_pct(gp,rev)
-    d["operating_margin_pct"]=ratio_pct(oi,rev)
-    d["net_margin_pct"]=ratio_pct(ni,rev)
-    d["ebitda_margin_pct"]=ratio_pct(ebitda,rev)
-    d["current_ratio_pct"]=ratio_pct(ca,cl)
-    d["quick_assets"]=None if ca is None or current.get("inventory") is None else ca-current["inventory"]
-    d["quick_ratio_pct"]=ratio_pct(d["quick_assets"],cl)
-    d["debt_to_equity_pct"]=ratio_pct(current.get("liabilities"),e)
-    d["equity_ratio_pct"]=ratio_pct(e,a)
-    d["debt_dependency_pct"]=ratio_pct(debt,a)
-    d["interest_coverage"]=div(oi, abs(current.get("interest_expense")) if current.get("interest_expense") is not None else None)
-    d["net_debt_to_ebitda"]=div(current.get("net_debt"),ebitda)
-    if previous:
-        d["avg_assets"]=avg(a,previous.get("assets"))
-        d["avg_equity"]=avg(e,previous.get("equity"))
-        d["avg_inventory"]=avg(current.get("inventory"),previous.get("inventory"))
-        d["avg_receivables"]=avg(current.get("receivables"),previous.get("receivables"))
+
+def calculate(current, previous=None, period_days=365, prior_comparable=None):
+    """Calculate ratios using matched statement periods and average balance-sheet values."""
+    data = dict(current)
+    revenue = data.get("revenue")
+    gross_profit = data.get("gross_profit")
+    operating_income = data.get("operating_income")
+    net_income = data.get("net_income")
+    assets_avg = _average(data, previous, "assets")
+    equity_avg = _average(data, previous, "equity")
+    inventory_avg = _average(data, previous, "inventory")
+    receivables_avg = _average(data, previous, "receivables")
+    payables_avg = _average(data, previous, "payables")
+    annualizer = 365 / period_days if period_days else 1
+
+    data["gross_margin_pct"] = _ratio_pct(gross_profit, revenue)
+    data["operating_margin_pct"] = _ratio_pct(operating_income, revenue)
+    data["net_margin_pct"] = _ratio_pct(net_income, revenue)
+    data["ebitda_margin_pct"] = _ratio_pct(data.get("ebitda"), revenue)
+    data["current_ratio_pct"] = _ratio_pct(data.get("current_assets"), data.get("current_liabilities"))
+    quick_assets = (
+        None if data.get("current_assets") is None or data.get("inventory") is None
+        else data["current_assets"] - data["inventory"]
+    )
+    data["quick_assets"] = quick_assets
+    data["quick_ratio_pct"] = _ratio_pct(quick_assets, data.get("current_liabilities"))
+    data["debt_to_equity_pct"] = _ratio_pct(data.get("liabilities"), data.get("equity"))
+    data["equity_ratio_pct"] = _ratio_pct(data.get("equity"), data.get("assets"))
+    data["debt_dependency_pct"] = _ratio_pct(data.get("interest_bearing_debt"), data.get("assets"))
+    interest = data.get("interest_expense")
+    data["interest_coverage"] = _div(operating_income, abs(interest) if interest is not None else None)
+    data["net_debt_to_ebitda"] = _div(data.get("net_debt"), data.get("ebitda"))
+
+    data["avg_assets"] = assets_avg
+    data["avg_equity"] = equity_avg
+    data["avg_inventory"] = inventory_avg
+    data["avg_receivables"] = receivables_avg
+    data["avg_payables"] = payables_avg
+    data["roa_pct"] = None if _ratio_pct(net_income, assets_avg) is None else _ratio_pct(net_income, assets_avg) * annualizer
+    data["roe_pct"] = None if _ratio_pct(net_income, equity_avg) is None else _ratio_pct(net_income, equity_avg) * annualizer
+    data["asset_turnover"] = None if _div(revenue, assets_avg) is None else _div(revenue, assets_avg) * annualizer
+
+    days = period_days or 365
+    cogs = data.get("cost_of_sales")
+    data["dso_days"] = None if _div(receivables_avg, revenue) is None else days * _div(receivables_avg, revenue)
+    data["dio_days"] = None if _div(inventory_avg, cogs) is None else days * _div(inventory_avg, cogs)
+    data["dpo_days"] = None if _div(payables_avg, cogs) is None else days * _div(payables_avg, cogs)
+    if all(data.get(key) is not None for key in ("dso_days", "dio_days", "dpo_days")):
+        data["ccc_days"] = data["dso_days"] + data["dio_days"] - data["dpo_days"]
     else:
-        d["avg_assets"]=a
-        d["avg_equity"]=e
-        d["avg_inventory"]=current.get("inventory")
-        d["avg_receivables"]=current.get("receivables")
-    d["roa_pct"]=ratio_pct(ni,d["avg_assets"])
-    d["roe_pct"]=ratio_pct(ni,d["avg_equity"])
-    d["asset_turnover"]=div(rev,d["avg_assets"])
-    d["dso_days"]=None
-    d["dio_days"]=None
-    if rev and d["avg_receivables"] is not None:
-        d["dso_days"]=365*div(d["avg_receivables"],rev)
-    # DIO needs COGS; use revenue - gross profit where available.
-    cogs = None if rev is None or gp is None else rev-gp
-    if cogs and d["avg_inventory"] is not None:
-        d["dio_days"]=365*div(d["avg_inventory"],cogs)
-    # DPO requires credit purchases, unavailable reliably from this API mapping.
-    d["dpo_days"]=None
-    d["ccc_days"]=None if d["dso_days"] is None or d["dio_days"] is None else d["dso_days"]+d["dio_days"]
-    if previous and previous.get("revenue") not in (None,0):
-        d["revenue_growth_pct"]=ratio_pct(rev-previous["revenue"],previous["revenue"])
-    else:
-        d["revenue_growth_pct"]=None
-    d["cfo_to_net_income"]=div(current.get("cfo"),ni)
-    return d
+        data["ccc_days"] = None
+
+    comparable_revenue = prior_comparable.get("revenue") if prior_comparable else None
+    data["revenue_growth_pct"] = (
+        _ratio_pct(revenue - comparable_revenue, comparable_revenue)
+        if revenue is not None and comparable_revenue not in (None, 0) else None
+    )
+    data["cfo_to_net_income"] = _div(data.get("cfo"), net_income)
+    return data
+
 
 def to_frame(records):
-    df=pd.DataFrame(records)
-    if df.empty: return df
-    cols=["year","period","revenue","gross_profit","operating_income","net_income","assets","cash",
-          "receivables","inventory","ppe","liabilities","equity","interest_bearing_debt",
-          "cfo","cfi","cff","capex","fcf","net_debt","ebitda","gross_margin_pct",
-          "operating_margin_pct","net_margin_pct","ebitda_margin_pct","roa_pct","roe_pct",
-          "current_ratio_pct","quick_ratio_pct","debt_to_equity_pct","equity_ratio_pct",
-          "debt_dependency_pct","interest_coverage","net_debt_to_ebitda","asset_turnover",
-          "dso_days","dio_days","dpo_days","ccc_days","revenue_growth_pct","cfo_to_net_income"]
-    return df[[c for c in cols if c in df.columns]]
+    df = pd.DataFrame(records)
+    if df.empty:
+        return df
+    columns = [
+        "year", "period", "period_label",
+        "revenue", "gross_profit", "cost_of_sales", "sga", "operating_income",
+        "pretax_income", "net_income", "controlling_net_income",
+        "assets", "current_assets", "cash", "receivables", "inventory", "ppe",
+        "current_liabilities", "payables", "liabilities", "equity",
+        "interest_bearing_debt", "net_debt",
+        "cfo", "cfi", "cff", "capex", "fcf", "ebitda",
+        "gross_margin_pct", "operating_margin_pct", "net_margin_pct",
+        "ebitda_margin_pct", "roa_pct", "roe_pct", "current_ratio_pct",
+        "quick_ratio_pct", "debt_to_equity_pct", "equity_ratio_pct",
+        "debt_dependency_pct", "interest_coverage", "net_debt_to_ebitda",
+        "asset_turnover", "dso_days", "dio_days", "dpo_days", "ccc_days",
+        "revenue_growth_pct", "cfo_to_net_income",
+    ]
+    return df[[column for column in columns if column in df.columns]]
